@@ -11,8 +11,9 @@ app.use(express.json());
 const FRONTENDS = [
   "http://localhost:5173",
   "https://aesthetic-squirrel-5d3516.netlify.app",
-  "https://apna-adda-1.onrender.com"
+  "https://apnaadda1.netlify.app" // your new Netlify site
 ];
+
 
 app.use(cors({
   origin: (origin, cb) => {
