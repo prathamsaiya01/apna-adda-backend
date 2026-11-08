@@ -27,7 +27,8 @@ function normalizeText(text) {
   if (typeof text !== "string") return "";
   return text
     .toLowerCase()
-    .replace(/[.,\/#!$%\^&\*;:{}=\-_`~()?"'’]/g, " ")
+    .replace(/['’]/g, "") // Remove contractions apostrophe cleanly e.g. "Dhoni's" -> "dhonis"
+    .replace(/[.,\/#!$%\^&\*;:{}=\-_`~()?"“”]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -373,13 +374,14 @@ module.exports = {
   // Maintain backward compatibility with matchAnswer
   matchAnswer: (rawInput, answersList) => {
     const res = semanticMatchAnswer(rawInput, { answers: answersList });
+    const legacyReason = res.status === "AMBIGUOUS" ? "AMBIGUOUS_MATCH" : (res.status === "UNMATCHED" ? "UNMATCHED" : res.reason);
     return {
       matched: res.status === "MATCHED",
       answerId: res.canonicalAnswerId,
       rank: res.matchedRank,
       points: res.points || 0,
       canonicalAnswer: res.canonicalAnswer,
-      reason: res.reason,
+      reason: legacyReason,
       status: res.status,
       confidence: res.confidence,
       matchingMethod: res.matchingMethod,
