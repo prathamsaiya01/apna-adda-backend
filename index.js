@@ -1,187 +1,230 @@
-// server/index.js
-const express = require("express");
-const http = require("http");
-const { Server } = require("socket.io");
-const cors = require("cors");
-const path = require("path");
+// apna-adda-backend/index.js
+try { require('dotenv').config(); } catch (e) {}
+const express = require('express');
+const http = require('http');
+const { Server } = require('socket.io');
+const cors = require('cors');
+const RoomManager = require('./roomManager');
 
 const app = express();
 app.use(express.json());
 
 const FRONTENDS = [
   "http://localhost:5173",
-  "https://apnaadda1.netlify.app",               // your Netlify site
-  "https://apna-adda-1.onrender.com",           // optional other clients
-  "https://apna-adda-backend.onrender.com"      // if needed
+  "http://localhost:3000",
+  "http://localhost:4173",
+  "https://apnaadda1.netlify.app",
+  "https://apna-adda-1.onrender.com",
+  "https://apna-adda-backend.onrender.com"
 ];
 
+app.use(
+  cors({
+    origin: (origin, cb) => {
+      if (!origin) return cb(null, true);
+      if (FRONTENDS.includes(origin)) return cb(null, true);
+      if (origin.endsWith(".netlify.app") || origin.includes("localhost") || origin.includes("127.0.0.1")) {
+        return cb(null, true);
+      }
+      return cb(null, true); // Allow all party devices
+    },
+    credentials: true
+  })
+);
 
-
-app.use(cors({
-  origin: (origin, cb) => {
-    // allow no-origin (curl/local)
-    if (!origin) return cb(null, true);
-    if (FRONTENDS.includes(origin)) return cb(null, true);
-    return cb(new Error("CORS not allowed"), false);
-  },
-  credentials: true
-}));
-
-// In-memory store (replace with DB in prod)
-const rooms = []; // { _id, code, name, gameKey, maxPlayers, hostId, players: [{ userId, name, score }], status, createdAt }
-const genId = () => Math.random().toString(36).slice(2,9);
-const genCode = () => Math.random().toString(36).slice(2,6).toUpperCase();
-
-// REST endpoints used by client
-app.post("/api/rooms", (req, res) => {
-  const { name, gameKey, maxPlayers, hostId } = req.body;
-  if (!gameKey) return res.status(400).json({ error: "gameKey required" });
-  const _id = genId();
-  const code = genCode();
-  const room = { _id, code, name, gameKey, maxPlayers: maxPlayers || 4, hostId, players: [], status: "waiting", createdAt: Date.now() };
-  rooms.push(room);
-  res.json(room);
-});
-
-app.get("/api/rooms", (req, res) => {
-  res.json(rooms);
-});
-
-app.get("/api/rooms/:id", (req, res) => {
-  const r = rooms.find(x => x._id === req.params.id);
-  if (!r) return res.status(404).json({ error: "not found" });
-  res.json(r);
-});
-
-app.delete("/api/rooms/:id", (req, res) => {
-  const idx = rooms.findIndex(x => x._id === req.params.id);
-  if (idx >= 0) rooms.splice(idx, 1);
-  res.json({ ok: true });
-});
-
-// Basic health
-app.get("/api/health", (req, res) => res.json({ ok: true }));
-
-// Socket server
+const PORT = process.env.PORT || 4000;
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: FRONTENDS,
-    methods: ["GET","POST"],
+    origin: "*",
+    methods: ["GET", "POST"],
     credentials: true
   }
 });
 
-// Map socket.id -> { roomId, userId }
-const socketMap = new Map();
+const roomManager = new RoomManager(io);
 
-io.on("connection", (socket) => {
-  console.log("socket connected", socket.id);
+const GAME_CATALOG = [
+  { id: "cricketers-atlas", name: "Cricketers Atlas", minPlayers: 2, maxPlayers: 10 },
+  { id: "mr-white", name: "Mr. White", minPlayers: 3, maxPlayers: 12 },
+  { id: "who-am-i", name: "Who Am I?", minPlayers: 2, maxPlayers: 10 },
+  { id: "spy-game", name: "Spy Game", minPlayers: 3, maxPlayers: 12 },
+  { id: "dumb-charades", name: "Dumb Charades", minPlayers: 2, maxPlayers: 16 },
+  { id: "hollywood-bollywood", name: "Hollywood-Bollywood", minPlayers: 2, maxPlayers: 10 },
+  { id: "mafia", name: "Mafia", minPlayers: 5, maxPlayers: 16 }
+];
 
-  // Player joins a room by code
-  socket.on("joinRoom", ({ code, userId, name }, cb) => {
-    try {
-      const room = rooms.find(r => r.code === (code||"").toUpperCase());
-      if (!room) return cb && cb({ error: "Room not found" });
+// ---------------- REST APIS ----------------
+app.post("/api/rooms", (req, res) => {
+  try {
+    const gameKey = req.body.gameKey || req.body.gameId;
+    const hostId = req.body.hostId || req.body.hostUserId;
+    const hostName = req.body.hostName || req.body.name;
+    const name = req.body.name || `${hostName || "Host"}'s Adda`;
+    const maxPlayers = req.body.maxPlayers;
+    if (!gameKey) return res.status(400).json({ error: "gameKey required" });
+    const room = roomManager.createRoom({ name, gameKey, maxPlayers, hostId, hostName });
+    res.json({
+      success: true,
+      ok: true,
+      room,
+      ...room
+    });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
 
-      // small duplicate-check
-      if (!room.players.find(p => p.userId === userId)) {
-        room.players.push({ userId, name, score: 0 });
-      }
+app.get("/api/rooms", (req, res) => {
+  res.json(roomManager.getAllRooms());
+});
 
-      // join socket.io room for real-time events
-      socket.join(`room_${room._id}`);
-      socketMap.set(socket.id, { roomId: room._id, userId });
+app.get("/api/rooms/:id", (req, res) => {
+  const room = roomManager.findRoom(req.params.id);
+  if (!room) return res.status(404).json({ error: "Room not found" });
+  res.json(room);
+});
 
-      // inform room clients
-      io.to(`room_${room._id}`).emit("roomUpdate", {
-        roomId: room._id,
-        code: room.code,
-        name: room.name,
-        gameKey: room.gameKey,
-        maxPlayers: room.maxPlayers,
-        players: room.players,
-        status: room.status
-      });
+app.delete("/api/rooms/:id", (req, res) => {
+  const room = roomManager.findRoom(req.params.id);
+  if (room) {
+    roomManager.cleanupRoom(room._id);
+  }
+  res.json({ ok: true });
+});
 
-      // inform admins (admin room convention: admin_<roomId>)
-      io.to(`admin_${room._id}`).emit("playersUpdate", room.players);
+app.get("/api/games/catalog", (req, res) => {
+  res.json(GAME_CATALOG);
+});
 
-      cb && cb({ ok: true, roomId: room._id });
-    } catch (err) {
-      console.error("joinRoom err", err);
-      cb && cb({ error: "join failed" });
-    }
-  });
+app.get("/api/games", (req, res) => {
+  if (req.query.catalog === "true") {
+    return res.json(GAME_CATALOG);
+  }
+  res.json(roomManager.getAllRooms());
+});
 
-  // Admin joins admin room to watch players
-  socket.on("adminJoin", ({ gameId }, cb) => {
-    socket.join(`admin_${gameId}`);
-    cb && cb({ ok: true });
-  });
+app.get("/api/games/:id", (req, res) => {
+  const room = roomManager.findRoom(req.params.id);
+  if (!room) return res.status(404).json({ error: "Game not found" });
+  res.json(room);
+});
 
-  // Host starts the room -> server emits roomStarted to room and to App to open the game
-  socket.on("startRoom", ({ roomId }, cb) => {
-    const room = rooms.find(r => r._id === roomId);
-    if (!room) return cb && cb({ error: "room not found" });
-    room.status = "active";
-    io.to(`room_${roomId}`).emit("roomStarted", { roomId, gameKey: room.gameKey, code: room.code });
-    io.to(`admin_${roomId}`).emit("gameStarted", { roomId });
-    cb && cb({ ok: true });
-  });
+app.delete("/api/games/:id", (req, res) => {
+  const room = roomManager.findRoom(req.params.id);
+  if (room) {
+    roomManager.cleanupRoom(room._id);
+  }
+  res.json({ ok: true });
+});
 
-  // Admin controls for quiz flow (if using games with questions)
-  socket.on("startGame", ({ gameId }, cb) => {
-    // for compatibility with game flow that uses /api/games
-    io.to(`game_${gameId}`).emit("gameStarted", { gameId });
-    cb && cb({ ok: true });
-  });
-
-  socket.on("nextQuestion", ({ gameId }, cb) => {
-    io.to(`game_${gameId}`).emit("nextQuestion", { gameId });
-    cb && cb({ ok: true });
-  });
-
-  // Answer submission pattern (players send answer)
-  socket.on("submitAnswer", ({ roomId, userId, answer }, cb) => {
-    try {
-      const room = rooms.find(r => r._id === roomId);
-      if (!room) return cb && cb({ error: "room not found" });
-      // VERY simple scoring: +10 for any answer (you'll replace with real validation)
-      const p = room.players.find(x => x.userId === userId);
-      if (p) p.score = (p.score || 0) + 10;
-      io.to(`room_${roomId}`).emit("playersUpdate", room.players);
-      io.to(`admin_${roomId}`).emit("playersUpdate", room.players);
-      cb && cb({ ok: true });
-    } catch (err) {
-      console.error(err);
-      cb && cb({ error: "submit failed" });
-    }
-  });
-
-  // Clean up on disconnect
-  socket.on("disconnect", () => {
-    const entry = socketMap.get(socket.id);
-    if (entry) {
-      const room = rooms.find(r => r._id === entry.roomId);
-      if (room) {
-        // optionally remove socket's player if you want; here we keep player in list
-        io.to(`room_${room._id}`).emit("roomUpdate", {
-          roomId: room._id,
-          code: room.code,
-          name: room.name,
-          gameKey: room.gameKey,
-          maxPlayers: room.maxPlayers,
-          players: room.players,
-          status: room.status
-        });
-        io.to(`admin_${room._id}`).emit("playersUpdate", room.players);
-      }
-      socketMap.delete(socket.id);
-    }
-    console.log("socket disconnect", socket.id);
+app.get("/api/health", (req, res) => {
+  res.json({
+    ok: true,
+    status: "ok",
+    rooms: roomManager.rooms.size,
+    timestamp: Date.now()
   });
 });
 
-const PORT = process.env.PORT || 4000;
-server.listen(PORT, () => console.log("Server listening on", PORT));
+// ---------------- SOCKET EVENTS ----------------
+io.on("connection", (socket) => {
+  console.log("Client connected:", socket.id);
+
+  // Join Room (Lobby)
+  socket.on("joinRoom", ({ code, roomId, roomIdentifier, userId, name }, cb) => {
+    try {
+      const result = roomManager.joinRoom(socket, { code, roomId, roomIdentifier, userId, name });
+      cb && cb(result);
+    } catch (err) {
+      console.warn("joinRoom error:", err.message);
+      cb && cb({ error: err.message });
+    }
+  });
+
+  // Join Game Channel
+  socket.on("joinGame", ({ roomId, userId }, cb) => {
+    try {
+      const result = roomManager.joinGameChannel(socket, { roomId, userId });
+      cb && cb(result);
+    } catch (err) {
+      console.warn("joinGame error:", err.message);
+      cb && cb({ error: err.message });
+    }
+  });
+
+  // Toggle ready status in lobby
+  socket.on("toggleReady", ({ roomId, userId }, cb) => {
+    try {
+      const userEntry = roomManager.socketToUser.get(socket.id);
+      const uid = userId || (userEntry ? userEntry.userId : null);
+      const result = roomManager.toggleReady(uid, roomId);
+      cb && cb(result);
+    } catch (err) {
+      cb && cb({ error: err.message });
+    }
+  });
+
+  // Host starts the game (with strict server-side validation)
+  socket.on("startRoom", ({ roomId, userId }, cb) => {
+    try {
+      const userEntry = roomManager.socketToUser.get(socket.id);
+      const uid = userId || (userEntry ? userEntry.userId : null);
+      const result = roomManager.startRoom(uid, roomId);
+      cb && cb(result);
+    } catch (err) {
+      console.warn("startRoom validation error:", err.message);
+      cb && cb({ error: err.message });
+    }
+  });
+
+  // Host kicks a player
+  socket.on("kickPlayer", ({ roomId, userId, targetUserId }, cb) => {
+    try {
+      const userEntry = roomManager.socketToUser.get(socket.id);
+      const hostUid = userId || (userEntry ? userEntry.userId : null);
+      const result = roomManager.kickPlayer(hostUid, { roomId, targetUserId });
+      cb && cb(result);
+    } catch (err) {
+      cb && cb({ error: err.message });
+    }
+  });
+
+  // Player leaves room
+  socket.on("leaveRoom", ({ roomId, userId }, cb) => {
+    try {
+      const userEntry = roomManager.socketToUser.get(socket.id);
+      const uid = userId || (userEntry ? userEntry.userId : null);
+      roomManager.leaveRoom(socket, { roomId, userId: uid });
+      cb && cb({ ok: true });
+    } catch (err) {
+      cb && cb({ error: err.message });
+    }
+  });
+
+  // Authoritative Game Action
+  socket.on("gameAction", ({ roomId, action, payload }, cb) => {
+    try {
+      const userEntry = roomManager.socketToUser.get(socket.id);
+      const userId = (userEntry && userEntry.userId) || (payload && payload.userId);
+      if (!userId) return cb && cb({ error: "Unidentified socket user" });
+      roomManager.handleGameAction(userId, { roomId, action, payload }, cb);
+    } catch (err) {
+      console.warn("gameAction error:", err.message);
+      cb && cb({ error: err.message });
+    }
+  });
+
+  // Disconnection handling with 60s reconnection grace period
+  socket.on("disconnect", () => {
+    roomManager.handleDisconnect(socket);
+  });
+});
+
+if (!module.parent && process.env.NODE_ENV !== "test") {
+  server.listen(PORT, () => {
+    console.log(`Apna Adda Game Server running on port ${PORT}`);
+  });
+}
+
+module.exports = { app, server, io, roomManager };
