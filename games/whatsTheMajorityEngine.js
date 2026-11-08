@@ -356,7 +356,8 @@ class WhatsTheMajorityEngine {
     this.state.gamePhase = "reveal";
     this.state.statusMessage = "All answers locked in! Revealing majority...";
 
-    const isFriends = this.mode === "friends";
+    const rawQ = this.privateRoundData.rawQuestion;
+    const isFriends = this.mode === "friends" || (rawQ && !rawQ.options);
     const chaos = this.state.activeChaosRule;
     const isReverse = chaos === "reverse_majority";
     const isDoublePoints = chaos === "double_points";
